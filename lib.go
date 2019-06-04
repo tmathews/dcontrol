@@ -53,15 +53,6 @@ type Unit struct {
 	SystemTargets []string // Names of all systemd processes to restart.
 }
 
-func Pack(filename string, pass string) ([]byte, error) {
-	data, err := PackTar(filename)
-	if err != nil {
-		return nil, err
-	}
-	// Encrypt data using password
-	return Encrypt(data, pass)
-}
-
 // Loops through the connection to copy the appropriate bytes into memory
 func ReadConnSec(conn net.Conn, length int64) ([]byte, error) {
 	var buf []byte
@@ -135,6 +126,15 @@ func WriteConnInt64(conn net.Conn, i int64) error {
 	return err
 }
 
+func Pack(filename string, pass string) ([]byte, error) {
+	data, err := PackTar(filename)
+	if err != nil {
+		return nil, err
+	}
+	// Encrypt data using password
+	return Encrypt(data, pass)
+}
+
 // This is the main function used by the daemon to accept a payload, it does too
 // much work atm. I'll clean up if I ever feel like it, but for now it works well.
 func AcceptPayload(c Conf, conn net.Conn) error {
@@ -206,8 +206,17 @@ func AcceptPayload(c Conf, conn net.Conn) error {
 		return err
 	}
 
+	// Find the single item in the tmp dir to use
+	xs, err := ioutil.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	if len(xs) != 1 {
+		return errors.New(fmt.Sprintf("expected a single item in tar, got %s", len(xs)))
+	}
+
 	// Move temp dir to path
-	if err := os.Rename(dir, unit.Filepath); err != nil {
+	if err := os.Rename(filepath.Join(dir, xs[0].Name()), unit.Filepath); err != nil {
 		return err
 	}
 
@@ -233,16 +242,25 @@ func TriggerUnit(unit Unit, action string) error {
 	return nil
 }
 
+// Should pack a single item, dir or file, into a tar. This is so that we can
+// assume that the 1 item inside will replace what's on the server.
 func PackTar(filename string) ([]byte, error) {
+	fp, err := filepath.Abs(filename)
+	if err != nil {
+		return nil, err
+	}
+
 	buf := bytes.NewBuffer([]byte{})
 	writer := tar.NewWriter(buf)
 	defer writer.Close()
 
-	_ = filepath.Walk(filename, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(fp, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
+
 		h, err := tar.FileInfoHeader(info, info.Name())
+		h.Name, _ = filepath.Rel(filepath.Dir(fp), path)
 		if err != nil {
 			return err
 		}
@@ -262,9 +280,14 @@ func PackTar(filename string) ([]byte, error) {
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 	return buf.Bytes(), nil
 }
 
+// Creates a temporary directory to dump the contents of the tar to and returns
+// the file path
 func UnpackTar(reader *tar.Reader) (dir string, err error) {
 	dir, err = ioutil.TempDir(os.TempDir(), "dcontrol-")
 	if err != nil {
@@ -284,15 +307,17 @@ func UnpackTar(reader *tar.Reader) (dir string, err error) {
 			continue
 		}
 
+		mode := os.FileMode(h.Mode&0x0fff)
+		fp := path.Join(dir, h.Name)
 		switch h.Typeflag {
 		case tar.TypeDir:
-			err = os.MkdirAll(path.Join(dir, h.Name), os.FileMode(0755))
+			err = os.MkdirAll(fp, mode)
 			if err != nil {
 				return
 			}
 		case tar.TypeReg:
 			var f *os.File
-			f, err = os.Create(path.Join(dir, h.Name))
+			f, err = os.OpenFile(fp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 			if err != nil {
 				return
 			}

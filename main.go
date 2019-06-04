@@ -54,7 +54,7 @@ func cmdDaemon(name string, args []string) error {
 	}
 
 	// Open server and listen for payloads
-	server, err := net.Listen("tcp", "localhost:"+strconv.Itoa(port))
+	server, err := net.Listen("tcp", "0.0.0.0:"+strconv.Itoa(port))
 	if err != nil {
 		return err
 	}
