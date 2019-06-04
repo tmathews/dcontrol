@@ -62,17 +62,17 @@ func Pack(filename string, pass string) ([]byte, error) {
 	return Encrypt(data, pass)
 }
 
-// Loops through the connection to copy the appriopriate bytes into memory
-func ReadConnSec(conn net.Conn, size int64) ([]byte, error) {
+// Loops through the connection to copy the appropriate bytes into memory
+func ReadConnSec(conn net.Conn, length int64) ([]byte, error) {
 	var buf []byte
 	var receivedBytes int64
 	writer := bytes.NewBuffer(buf)
 	for {
-		if receivedBytes >= size {
+		if receivedBytes >= length {
 			break
 		}
 		size := bufferSize
-		remaining := size - receivedBytes
+		remaining := length - receivedBytes
 		if remaining < size {
 			size = remaining
 		}
@@ -113,6 +113,10 @@ func ReadConnStr(conn net.Conn, length int64) (string, error) {
 		return "", err
 	}
 	return TrimZeroStr(string(buf[:])), nil
+}
+
+func WriteConnFileSize(conn net.Conn, size int) error {
+	return WriteConnStr(conn, strconv.Itoa(size), 10)
 }
 
 // This will pad the string with 0 if the string is too short, otherwise it will
@@ -270,7 +274,6 @@ func UnpackTar(reader *tar.Reader) (dir string, err error) {
 	for {
 		var h *tar.Header
 		h, err = reader.Next()
-		fmt.Println(err)
 		if err == io.EOF {
 			err = nil
 			break

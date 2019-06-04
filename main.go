@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 
 	"github.com/BurntSushi/toml"
@@ -75,7 +76,6 @@ func cmdDaemon(name string, args []string) error {
 			} else {
 				response = "OK!"
 			}
-
 			if err := WriteConnInt64(conn, int64(len(response))); err != nil {
 				fmt.Println(err)
 			}
@@ -92,15 +92,13 @@ func cmdDeploy(name string, args []string) error {
 		return err
 	}
 	connStr := set.Arg(0)
-	unitName := set.Arg(1)
-	filename := set.Arg(2)
+	filename := set.Arg(1)
 
 	if connStr == "" {
 		return errors.New("empty connection string")
 	}
-	if unitName == "" {
-		return errors.New("empty unit name")
-	}
+	connStr = "//"+connStr
+
 	if filename == "" {
 		return errors.New("empty filename provided")
 	}
@@ -110,6 +108,8 @@ func cmdDeploy(name string, args []string) error {
 		return err
 	}
 
+	port := u.Port()
+	unitName := path.Base(u.Path)
 	actorName := u.User.Username()
 	password, _ := u.User.Password()
 
@@ -119,15 +119,16 @@ func cmdDeploy(name string, args []string) error {
 	if password == "" {
 		return errors.New("empty password provided.")
 	}
+	if unitName == "" {
+		return errors.New("empty unit name")
+	}
+	if port == "" {
+		port = strconv.Itoa(defaultPort)
+	}
 
 	data, err := Pack(filename, password)
 	if err != nil {
 		return err
-	}
-
-	port := u.Port()
-	if port == "" {
-		port = strconv.Itoa(defaultPort)
 	}
 	conn, err := net.Dial("tcp", u.Hostname()+":"+port)
 	if err != nil {
@@ -145,12 +146,15 @@ func cmdDeploy(name string, args []string) error {
 	if err := WriteConnInt64(conn, int64(len(data))); err != nil {
 		return err
 	}
-	if _, err := conn.Write(data); err != nil {
+	if n, err := conn.Write(data); err != nil {
 		return err
+	} else {
+		fmt.Printf("Wrote %d bytes.\n", n)
 	}
+	fmt.Printf("Waiting...\n")
 
 	// Read the response and print it!
-	strLength, err := ReadConnFileSize(conn)
+	strLength, err := ReadConnInt64(conn)
 	if err != nil {
 		return err
 	}
@@ -158,7 +162,7 @@ func cmdDeploy(name string, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(response)
+	fmt.Printf("Response: %s\n", response)
 
 	return nil
 }
