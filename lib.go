@@ -237,8 +237,22 @@ func AcceptPayload(c Conf, conn net.Conn) error {
 func TriggerUnit(unit Unit, action string) error {
 	// TODO in future we need to do a dbus call & check errors!
 	for _, target := range unit.SystemTargets {
-		exec.Command("systemd", action, target)
+		fmt.Printf("exec: systemctl %s %s\n", action, target)
+		cmd := exec.Command("systemctl", action, target)
+
+		if r, err := cmd.StdoutPipe(); err != nil {
+			io.Copy(os.Stdout, r)
+		}
+		if r, err := cmd.StderrPipe(); err != nil {
+			io.Copy(os.Stderr, r)
+		}
+
+		err := cmd.Start()
+		if err != nil {
+			fmt.Println(err)
+		}
 	}
+	time.Sleep(time.Millisecond * 500)
 	return nil
 }
 
