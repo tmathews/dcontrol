@@ -8,7 +8,9 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 	cmd "github.com/tmathews/commander"
@@ -87,17 +89,30 @@ func cmdDaemon(name string, args []string) error {
 }
 
 func cmdDeploy(name string, args []string) error {
+	var ignoreStr string
 	set := flag.NewFlagSet(name, flag.ExitOnError)
+	set.StringVar(&ignoreStr, "i", fmt.Sprintf("%[1]c.git,%[1]c.idea", filepath.Separator), "Ignore project files")
+	set.BoolVar(&Verbose, "v", false, "Be verbose")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
+
+	if xs := strings.Split(ignoreStr, ","); len(xs) > 0 {
+		for _, v := range xs {
+			v = strings.TrimSpace(v)
+			if len(v) > 0 {
+				IgnoreFiles = append(IgnoreFiles, v)
+			}
+		}
+	}
+
 	connStr := set.Arg(0)
 	filename := set.Arg(1)
 
 	if connStr == "" {
 		return errors.New("empty connection string")
 	}
-	connStr = "//"+connStr
+	connStr = "//" + connStr
 
 	if filename == "" {
 		return errors.New("empty filename provided")

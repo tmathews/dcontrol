@@ -28,6 +28,11 @@ const (
 	bufferSize  int64 = 1024
 )
 
+var (
+	IgnoreFiles []string
+	Verbose     bool
+)
+
 // Systemd CLI actions
 const (
 	ActionStart   = "start"
@@ -51,6 +56,15 @@ type Unit struct {
 	Filepath      string // The payload which will be replaced. May be file or entire directory
 	Name          string
 	SystemTargets []string // Names of all systemd processes to restart.
+}
+
+func IsProjectPath(p string) bool {
+	for _, v := range IgnoreFiles {
+		if strings.Contains(p, v) {
+			return true
+		}
+	}
+	return false
 }
 
 // Loops through the connection to copy the appropriate bytes into memory
@@ -212,7 +226,7 @@ func AcceptPayload(c Conf, conn net.Conn) error {
 		return err
 	}
 	if len(xs) != 1 {
-		return errors.New(fmt.Sprintf("expected a single item in tar, got %s", len(xs)))
+		return errors.New(fmt.Sprintf("expected a single item in tar, got %d", len(xs)))
 	}
 
 	// Move temp dir to path
@@ -268,13 +282,24 @@ func PackTar(filename string) ([]byte, error) {
 	writer := tar.NewWriter(buf)
 	defer writer.Close()
 
-	err = filepath.Walk(fp, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(fp, func(p string, info os.FileInfo, err error) error {
+		if IsProjectPath(p) {
+			return nil
+		}
+
 		if err != nil {
 			return err
 		}
 
 		h, err := tar.FileInfoHeader(info, info.Name())
-		h.Name, _ = filepath.Rel(filepath.Dir(fp), path)
+		if v, err := filepath.Rel(filepath.Dir(fp), p); err != nil {
+			return err
+		} else {
+			h.Name = filepath.ToSlash(v)
+		}
+		if Verbose {
+			fmt.Println(h.Name)
+		}
 		if err != nil {
 			return err
 		}
@@ -284,7 +309,7 @@ func PackTar(filename string) ([]byte, error) {
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		f, err := os.Open(path)
+		f, err := os.Open(p)
 		if err != nil {
 			return err
 		}
@@ -321,7 +346,7 @@ func UnpackTar(reader *tar.Reader) (dir string, err error) {
 			continue
 		}
 
-		mode := os.FileMode(h.Mode&0x0fff)
+		mode := os.FileMode(h.Mode & 0x0fff)
 		fp := path.Join(dir, h.Name)
 		switch h.Typeflag {
 		case tar.TypeDir:
