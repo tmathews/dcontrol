@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"net"
 	"net/url"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	cmd "github.com/tmathews/commander"
@@ -61,7 +63,7 @@ func cmdDaemon(name string, args []string) error {
 		return err
 	}
 	defer server.Close()
-	fmt.Println("Listening")
+	fmt.Println("Listening on port", port)
 	for {
 		conn, err := server.Accept()
 		if err != nil {
@@ -101,6 +103,7 @@ func cmdDeploy(name string, args []string) error {
 		for _, v := range xs {
 			v = strings.TrimSpace(v)
 			if len(v) > 0 {
+				fmt.Println("Ignoring", v)
 				IgnoreFiles = append(IgnoreFiles, v)
 			}
 		}
@@ -141,6 +144,7 @@ func cmdDeploy(name string, args []string) error {
 		port = strconv.Itoa(defaultPort)
 	}
 
+	fmt.Println("Packing...")
 	data, err := Pack(filename, password)
 	if err != nil {
 		return err
@@ -161,12 +165,27 @@ func cmdDeploy(name string, args []string) error {
 	if err := WriteConnInt64(conn, int64(len(data))); err != nil {
 		return err
 	}
+	log.Printf("Uploading %d bytes\n", len(data))
+
+	// This block is to give periodic feedback when running the script
+	// Otherwise for very large uploads or slow connections it can appear as if the
+	// the program has stalled
+	started := time.Now()
+	var working = true
+	go func() {
+		for working {
+			time.Sleep(time.Second * 5)
+			log.Printf("%.0f seconds elapsed...\n", time.Now().Sub(started).Seconds())
+		}
+		return
+	}()
 	if n, err := conn.Write(data); err != nil {
 		return err
 	} else {
-		fmt.Printf("Wrote %d bytes.\n", n)
+		log.Printf("Wrote %d bytes.\n", n)
 	}
-	fmt.Printf("Waiting...\n")
+	working = false
+	log.Printf("Waiting...\n")
 
 	// Read the response and print it!
 	strLength, err := ReadConnInt64(conn)
@@ -177,7 +196,7 @@ func cmdDeploy(name string, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Response: %s\n", response)
+	log.Printf("Response: %s\n", response)
 
 	return nil
 }
