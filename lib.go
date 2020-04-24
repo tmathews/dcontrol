@@ -264,6 +264,11 @@ func AcceptPayload(c Conf, conn net.Conn) error {
 			if err := TriggerUnit(unit, ActionRestart); err != nil {
 				return err
 			}
+
+			if err := DeleteBackup(failedBackup); err != nil {
+				return err
+			}
+
 			return fmt.Errorf("deploy failed with '%s'. Restored backup", err)
 		} else {
 			log.Println("No backup exists while trying to restore")
@@ -288,6 +293,10 @@ func AcceptPayload(c Conf, conn net.Conn) error {
 	// Run any custom cmds meant to happen after the service is started
 	if err := RunAfterCmds(unit); err != nil {
 		return restoreBackup(err)
+	}
+
+	if err := DeleteBackup(backupPath); err != nil {
+		return err
 	}
 
 	return nil
@@ -351,6 +360,11 @@ func RunCmd(cmd *exec.Cmd) error {
 	}
 
 	return cmd.Wait()
+}
+
+func DeleteBackup(backupPath string) error {
+	log.Printf("Deleting backup '%s'\n", backupPath)
+	return os.RemoveAll(backupPath)
 }
 
 // Should pack a single item, dir or file, into a tar. This is so that we can
