@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -154,7 +155,7 @@ func Pack(filename string, pass string) ([]byte, error) {
 // This is the main function used by the daemon to accept a payload, it does too
 // much work atm. I'll clean up if I ever feel like it, but for now it works well.
 func AcceptPayload(c Conf, conn net.Conn) error {
-	fmt.Println("Accepting payload...")
+	log.Println("Accepting payload...")
 	// First 64 bytes must be unit's name
 	unitName, err := ReadConnStr(conn, 64)
 	if err != nil {
@@ -172,25 +173,25 @@ func AcceptPayload(c Conf, conn net.Conn) error {
 	}
 
 	// Make sure user exists before continuing
-	fmt.Println("Checking auth...")
+	log.Println("Checking auth...")
 	if !CheckAuth(c, unitName, actor) {
 		return errors.New(fmt.Sprintf("invalid authorization, actor name '%s', unit name '%s'", actor, unitName))
 	}
 
 	// Read the tar into memory
-	fmt.Println("Reading tar...")
+	log.Println("Reading tar...")
 	tarBuf, err := ReadConnSec(conn, fileSize)
 	if err != nil {
 		return err
 	}
 
 	// Decrypt tar file with actor's password
-	fmt.Println("Decrypting tar...")
+	log.Println("Decrypting tar...")
 	data, err := Decrypt(tarBuf, GetPass(c, actor))
 	if err != nil {
 		return err
 	}
-	fmt.Println("Unpacking tar...")
+	log.Println("Unpacking tar...")
 	dir, err := UnpackTar(tar.NewReader(bytes.NewReader(data)))
 	if dir != "" {
 		defer os.RemoveAll(dir)
@@ -200,14 +201,14 @@ func AcceptPayload(c Conf, conn net.Conn) error {
 	}
 
 	unit := GetUnit(c, unitName)
-	fmt.Println("Stopping service...")
+	log.Println("Stopping service...")
 	// Halt unit to commence deployment
 	if err := TriggerUnit(unit, ActionStop); err != nil {
 		return err
 	}
 
 	// Ensure parent dir of unit exists
-	fmt.Println("Creating backup...")
+	log.Println("Creating backup...")
 	err = os.MkdirAll(path.Dir(unit.Filepath), os.FileMode(0755))
 	if err != nil {
 		return err
@@ -219,8 +220,8 @@ func AcceptPayload(c Conf, conn net.Conn) error {
 	_, err = os.Stat(unit.Filepath)
 	if err == nil {
 		backupExists = true
-		backupPath := path.Join(c.BackupDirectory, unit.Name+time.Now().Format(".20060102150405.bak"))
-		fmt.Printf("Move '%s' to '%s'\n", unit.Filepath, backupPath)
+		backupPath = path.Join(c.BackupDirectory, unit.Name+time.Now().Format(".20060102150405.bak"))
+		log.Printf("Move '%s' to '%s'\n", unit.Filepath, backupPath)
 		err := os.Rename(unit.Filepath, backupPath)
 		if err != nil {
 			return err
@@ -241,36 +242,50 @@ func AcceptPayload(c Conf, conn net.Conn) error {
 	// Move temp dir to path
 	oldpath := filepath.Join(dir, xs[0].Name())
 	newpath := unit.Filepath
-	fmt.Printf("Moving '%s' to '%s'\n", oldpath, newpath)
+	log.Printf("Moving '%s' to '%s'\n", oldpath, newpath)
 	if err := os.Rename(oldpath, newpath); err != nil {
 		return err
 	}
 
 	restoreBackup := func(err error) error {
 		if backupExists {
-			if err := os.Rename(backupPath, unit.Filepath); err != nil {
+			failedBackup := path.Join(c.BackupDirectory, unit.Name+time.Now().Format(".20060102150405.failed.bak"))
+			log.Printf("Moving failing '%s' to '%s' to make room for backup\n", unit.Filepath, failedBackup)
+			if err := os.Rename(unit.Filepath, failedBackup); err != nil {
+				log.Printf("Error moving failure: %s\n", err)
 				return err
 			}
-			return TriggerUnit(unit, ActionRestart)
+
+			log.Printf("Restoring backup from '%s' to '%s'\n", backupPath, unit.Filepath)
+			if err := os.Rename(backupPath, unit.Filepath); err != nil {
+				log.Printf("Error restoring backup: %s\n", err)
+				return err
+			}
+			if err := TriggerUnit(unit, ActionRestart); err != nil {
+				return err
+			}
+			return fmt.Errorf("deploy failed with '%s'. Restored backup", err)
+		} else {
+			log.Println("No backup exists while trying to restore")
 		}
 		return err
 	}
 
 	// Try to run custom commands for the unit (if it has any)
 	// If that fails rollback the deployment
-	fmt.Printf("Running %d BeforeCmds\n", len(unit.BeforeCmds))
+	log.Printf("Running %d BeforeCmds\n", len(unit.BeforeCmds))
 	if err := RunBeforeCmds(unit); err != nil {
 		return restoreBackup(err)
 	}
 
-	fmt.Println("Starting service...")
+	log.Println("Starting service...")
 	// Start unit back up and check for smooth sailings, if not rollback the deployment
 	if err := TriggerUnit(unit, ActionStart); err != nil {
 		return restoreBackup(err)
 	}
 
-	fmt.Printf("Running %d AfterCmds\n", len(unit.AfterCmds))
-	// Run any custom cmds meant to happen before the service is stopped
+	log.Printf("Running %d AfterCmds\n", len(unit.AfterCmds))
+	// Run any custom cmds meant to happen after the service is started
 	if err := RunAfterCmds(unit); err != nil {
 		return restoreBackup(err)
 	}
@@ -290,15 +305,20 @@ func RunUnitCmds(unit Unit, cmds []string) error {
 	for _, cmd := range cmds {
 		parts := strings.Split(cmd, " ")
 		name := parts[0]
+
+		if name == "" {
+			return errors.New("cmd name is blank")
+		}
+
 		params := []string{}
 		if len(cmd) > 1 {
 			params = parts[1:]
 		}
 		toRun := exec.Command(name, params...)
 		toRun.Dir = unit.Filepath
-		fmt.Printf("exec: %s\n", cmd)
+		log.Printf("exec: %s\n", cmd)
 		if err := RunCmd(toRun); err != nil {
-			fmt.Printf("Error running '%s': %s\n", cmd, err)
+			log.Printf("Error running '%s': %s\n", cmd, err)
 			return err
 		}
 	}
@@ -308,10 +328,10 @@ func RunUnitCmds(unit Unit, cmds []string) error {
 func TriggerUnit(unit Unit, action string) error {
 	// TODO in future we need to do a dbus call & check errors!
 	for _, target := range unit.SystemTargets {
-		fmt.Printf("exec: systemctl %s %s\n", action, target)
+		log.Printf("exec: systemctl %s %s\n", action, target)
 		cmd := exec.Command("systemctl", action, target)
 		if err := RunCmd(cmd); err != nil {
-			fmt.Println(err)
+			log.Println(err)
 		}
 	}
 	time.Sleep(time.Millisecond * 500)
@@ -361,7 +381,7 @@ func PackTar(filename string) ([]byte, error) {
 			h.Name = filepath.ToSlash(v)
 		}
 		if Verbose {
-			fmt.Println(h.Name)
+			log.Println(h.Name)
 		}
 		if err != nil {
 			return err
