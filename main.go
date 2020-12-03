@@ -1,31 +1,34 @@
 package main
 
 import (
-	"errors"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"log"
-	"net"
-	"net/url"
 	"os"
-	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
 	cmd "github.com/tmathews/commander"
+	"github.com/tmathews/goio"
 )
+
+const appName = "dctl"
 
 func main() {
 	var args []string
 	if len(os.Args) >= 2 {
 		args = os.Args[1:]
 	}
-	err := cmd.Exec(args, cmd.Manual("Welcome to dcontrol", "JUST DO IT!\n"), cmd.M{
-		"daemon": cmdDaemon,
-		"deploy": cmdDeploy,
+	err := cmd.Exec(args, cmd.Manual(fmt.Sprintf("Welcome to %s.", appName), "Send it!\n"), cmd.M{
+		"generate": cmdGenerate,
+		"daemon":   cmdDaemon,
+		"send":     cmdSend,
+		"ping":     cmdPing,
 	})
 	if err != nil {
 		switch v := err.(type) {
@@ -39,17 +42,88 @@ func main() {
 	}
 }
 
-func cmdDaemon(name string, args []string) error {
-	var port int
-	var confFilename string
+func cmdGenerate(name string, args []string) error {
+	var org string
+	var d time.Duration
+	var pub bool
 	set := flag.NewFlagSet(name, flag.ExitOnError)
-	set.IntVar(&port, "port", defaultPort, "Port to run on.")
-	set.StringVar(&confFilename, "c", "./dcontrol.toml", "Location of config file.")
+	set.StringVar(&org, "organization", "", "Organization name to use for certificate.")
+	set.DurationVar(&d, "duration", time.Hour*24*365*5, "How long should this certificate last?")
+	set.BoolVar(&pub, "public-key", false, "Print the public key from the provided filepath instead.")
+	set.Usage = func() {
+		fmt.Printf("\n%s %s [flags...] <filename>\n\n<filename> should be the location where credentials are read/wrote.\n\n", appName, name)
+		set.PrintDefaults()
+	}
 	if err := set.Parse(args); err != nil {
 		return err
 	}
 
-	var conf Conf
+	loc := set.Arg(0)
+	if stat, err := os.Stat(filepath.Dir(loc)); os.IsNotExist(err) {
+		return &FlagError{
+			Flag:   "filepath",
+			Reason: "The provided filepath does not exist, please check your input.",
+		}
+	} else if err != nil {
+		return &FlagError{
+			Flag:   "filepath",
+			Reason: err.Error(),
+		}
+	} else if !stat.IsDir() {
+		return &FlagError{
+			Flag:   "filepath",
+			Reason: "The filepath provided is not a valid directory placement.",
+		}
+	}
+
+	var cert *x509.Certificate
+	if !pub {
+		var key *rsa.PrivateKey
+		var err error
+		cert, key, err = goio.GenerateCerts(org, d)
+		if err != nil {
+			return err
+		}
+		if err = goio.WriteCertificate(cert, loc+".cert"); err != nil {
+			return err
+		}
+		if err = goio.WritePrivateKey(key, loc+".key"); err != nil {
+			return err
+		}
+		fmt.Println("Certificate & key generated.")
+	} else {
+		if c, err := tls.LoadX509KeyPair(loc+".cert", loc+".key"); err != nil {
+			return err
+		} else {
+			cert, err = x509.ParseCertificate(c.Certificate[0])
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	signature := GetSignature(cert)
+	fmt.Printf("Public Key:\n%s", signature)
+
+	return nil
+}
+
+func cmdDaemon(name string, args []string) error {
+	var address, confFilename, certFilename, keyFilename string
+	set := flag.NewFlagSet(name, flag.ExitOnError)
+	set.StringVar(&address, "address", DefaultAddress, "Address to bind to.")
+	set.StringVar(&confFilename, "config", AppFilename("conf.toml"), "Location of config file.")
+	set.StringVar(&certFilename, "cert", AppFilename("cert"), "")
+	set.StringVar(&keyFilename, "key", AppFilename("key"), "")
+	set.Usage = func() {
+		fmt.Printf("\n%s %s [flags...]\n\n", appName, name)
+		set.PrintDefaults()
+	}
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+
+	var conf Config
 	if _, err := toml.DecodeFile(confFilename, &conf); err != nil {
 		return err
 	}
@@ -57,146 +131,147 @@ func cmdDaemon(name string, args []string) error {
 		return err
 	}
 
-	// Open server and listen for payloads
-	server, err := net.Listen("tcp", "0.0.0.0:"+strconv.Itoa(port))
+	server := &goio.Server{}
+	if err := server.LoadCert(certFilename, keyFilename); err != nil {
+		return err
+	}
+	listener, err := server.Listen(address, true)
 	if err != nil {
 		return err
 	}
-	defer server.Close()
-	fmt.Println("Listening on port", port)
+
+	log.Printf("Server opened on %s.\n", address)
+	var logId int
+
 	for {
-		conn, err := server.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
-			fmt.Println("Error: ", err)
+			log.Println(err)
 			continue
 		}
 		go func() {
-			defer conn.Close()
-			var response string
-			err := AcceptPayload(conf, conn)
-			if err != nil {
-				fmt.Print(err)
-				response = err.Error()
-			} else {
-				response = "OK!"
+			logId++
+			ctx := ServerContext{
+				C:      tls.Server(conn, server.Conf),
+				Config: &conf,
+				Log:    log.New(os.Stdout, fmt.Sprintf("con[%d] ", logId), log.LstdFlags),
 			}
-			if err := WriteConnInt64(conn, int64(len(response))); err != nil {
-				fmt.Println(err)
-			}
-			if _, err := conn.Write([]byte(response)); err != nil {
-				fmt.Println(err)
+			err := HandleServerConn(ctx)
+			if goio.IsClosed(err) {
+				ctx.Log.Println("Client got disconnected.")
+			} else if err != nil {
+				ctx.Log.Println(err)
+				conn.Close()
 			}
 		}()
 	}
 }
 
-func cmdDeploy(name string, args []string) error {
-	var ignoreStr string
+func cmdPing(name string, args []string) error {
+	var certFilename, keyFilename string
 	set := flag.NewFlagSet(name, flag.ExitOnError)
-	set.StringVar(&ignoreStr, "i", fmt.Sprintf("%[1]c.git,%[1]c.idea", filepath.Separator), "Ignore project files")
-	set.BoolVar(&Verbose, "v", false, "Be verbose")
+	set.StringVar(&certFilename, "cert", UsrFilename("cert"), "")
+	set.StringVar(&keyFilename, "key", UsrFilename("key"), "")
+	set.Usage = func() {
+		fmt.Printf(`
+%s %s [flags...] <address>
+
+<address>  the server address and port to send to e.g. %s
+
+`, appName, name, DefaultAddress)
+		set.PrintDefaults()
+	}
 	if err := set.Parse(args); err != nil {
 		return err
 	}
 
+	address := set.Arg(0)
+	if len(address) == 0 {
+		return &ArgError{Argument: "address", Position: 1, Reason: "Missing"}
+	}
+
+	cert, err := tls.LoadX509KeyPair(certFilename, keyFilename)
+	if err != nil {
+		return err
+	}
+	conf := &tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		InsecureSkipVerify: true,
+	}
+	fmt.Println("Dialing...")
+	c, err := tls.Dial("tcp", address, conf)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+
+	err = HandleClientConnPing(tls.Client(c, conf))
+	if err != nil {
+		return err
+	}
+	fmt.Println("PING successful!")
+	return nil
+}
+
+
+func cmdSend(name string, args []string) error {
+	var ignoreStr, certFilename, keyFilename string
+	set := flag.NewFlagSet(name, flag.ExitOnError)
+	set.StringVar(&ignoreStr, "ignore", fmt.Sprintf("%[1]c.git,%[1]c.idea", filepath.Separator), "Ignore project files")
+	set.StringVar(&certFilename, "cert", UsrFilename("cert"), "")
+	set.StringVar(&keyFilename, "key", UsrFilename("key"), "")
+	set.Usage = func() {
+		fmt.Printf(`
+%s %s [flags...] <address> <target> <filename>
+
+<address>  the server address and port to send to e.g. %s
+<target>   the target name to deploy
+<filename> the filepath to a directory or file which is to be sent as the target
+
+`, appName, name, DefaultAddress)
+		set.PrintDefaults()
+	}
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+
+	address := set.Arg(0)
+	target := set.Arg(1)
+	filename := set.Arg(2)
+	if len(address) == 0 {
+		return &ArgError{Argument: "address", Position: 1, Reason: "Missing"}
+	}
+	if len(target) == 0 {
+		return &ArgError{Argument: "target", Position: 2, Reason: "Missing"}
+	}
+	if len(filename) == 0 {
+		return &ArgError{Argument: "filename", Position: 3, Reason: "Missing"}
+	}
+
+	var ignore []string
 	if xs := strings.Split(ignoreStr, ","); len(xs) > 0 {
 		for _, v := range xs {
 			v = strings.TrimSpace(v)
 			if len(v) > 0 {
-				fmt.Println("Ignoring", v)
-				IgnoreFiles = append(IgnoreFiles, v)
+				ignore = append(ignore, v)
 			}
 		}
 	}
 
-	connStr := set.Arg(0)
-	filename := set.Arg(1)
-
-	if connStr == "" {
-		return errors.New("empty connection string")
-	}
-	connStr = "//" + connStr
-
-	if filename == "" {
-		return errors.New("empty filename provided")
-	}
-
-	u, err := url.Parse(connStr)
+	cert, err := tls.LoadX509KeyPair(certFilename, keyFilename)
 	if err != nil {
 		return err
 	}
-
-	port := u.Port()
-	unitName := path.Base(u.Path)
-	actorName := u.User.Username()
-	password, _ := u.User.Password()
-
-	if actorName == "" {
-		return errors.New("empty actor name provided")
+	conf := &tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		InsecureSkipVerify: true,
 	}
-	if password == "" {
-		return errors.New("empty password provided.")
-	}
-	if unitName == "" {
-		return errors.New("empty unit name")
-	}
-	if port == "" {
-		port = strconv.Itoa(defaultPort)
-	}
-
-	fmt.Println("Packing...")
-	data, err := Pack(filename, password)
+	fmt.Println("Dialing...")
+	c, err := tls.Dial("tcp", address, conf)
 	if err != nil {
 		return err
 	}
-	conn, err := net.Dial("tcp", u.Hostname()+":"+port)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
+	defer c.Close()
 
-	// Write all the data in the correct order: unitName(64), actorName(64), size(8), data(N)
-	if err := WriteConnStr(conn, unitName, 64); err != nil {
-		return err
-	}
-	if err := WriteConnStr(conn, actorName, 64); err != nil {
-		return err
-	}
-	if err := WriteConnInt64(conn, int64(len(data))); err != nil {
-		return err
-	}
-	log.Printf("Uploading %d bytes\n", len(data))
-
-	// This block is to give periodic feedback when running the script
-	// Otherwise for very large uploads or slow connections it can appear as if the
-	// the program has stalled
-	started := time.Now()
-	var working = true
-	go func() {
-		for working {
-			time.Sleep(time.Second * 5)
-			log.Printf("%.0f seconds elapsed...\n", time.Now().Sub(started).Seconds())
-		}
-		return
-	}()
-	if n, err := conn.Write(data); err != nil {
-		return err
-	} else {
-		log.Printf("Wrote %d bytes.\n", n)
-	}
-	working = false
-	log.Printf("Waiting...\n")
-
-	// Read the response and print it!
-	strLength, err := ReadConnInt64(conn)
-	if err != nil {
-		return err
-	}
-	response, err := ReadConnStr(conn, strLength)
-	if err != nil {
-		return err
-	}
-	log.Printf("Response: %s\n", response)
-
-	return nil
+	return HandleClientConn(tls.Client(c, conf), target, filename, ignore)
 }
