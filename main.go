@@ -1,21 +1,18 @@
 package main
 
 import (
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
-	"log"
-	"net"
-	"net/url"
-	"os"
-	"path"
-	"path/filepath"
-	"strconv"
-	"strings"
-	"time"
-
 	"github.com/BurntSushi/toml"
+	arc "github.com/tmathews/arcnet"
 	cmd "github.com/tmathews/commander"
+	"log"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 )
 
 func main() {
@@ -23,9 +20,9 @@ func main() {
 	if len(os.Args) >= 2 {
 		args = os.Args[1:]
 	}
-	err := cmd.Exec(args, cmd.Manual("Welcome to dcontrol", "JUST DO IT!\n"), cmd.M{
+	err := cmd.Exec(args, cmd.Manual("Welcome to deployctl.", "Send it!\n"), cmd.M{
 		"daemon": cmdDaemon,
-		"deploy": cmdDeploy,
+		"send":   cmdSend,
 	})
 	if err != nil {
 		switch v := err.(type) {
@@ -39,17 +36,30 @@ func main() {
 	}
 }
 
+func AppDir() string {
+	switch runtime.GOOS {
+	case "linux":
+		return "/etc/deployctl"
+	}
+	return ""
+}
+
+func AppFilename(str string) string {
+	return filepath.Join(AppDir(), str)
+}
+
 func cmdDaemon(name string, args []string) error {
-	var port int
-	var confFilename string
-	set := flag.NewFlagSet(name, flag.ExitOnError)
-	set.IntVar(&port, "port", defaultPort, "Port to run on.")
-	set.StringVar(&confFilename, "c", "./dcontrol.toml", "Location of config file.")
+	var address, confFilename, certFilename, keyFilename string
+	set := flag.NewFlagSet(name, flag.ContinueOnError)
+	set.StringVar(&address, "address", DefaultAddress, "Address to bind to.")
+	set.StringVar(&confFilename, "config", AppFilename("conf.toml"), "Location of config file.")
+	set.StringVar(&certFilename, "cert", AppFilename("cert"), "")
+	set.StringVar(&keyFilename, "key", AppFilename("key"), "")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
 
-	var conf Conf
+	var conf Config
 	if _, err := toml.DecodeFile(confFilename, &conf); err != nil {
 		return err
 	}
@@ -57,146 +67,79 @@ func cmdDaemon(name string, args []string) error {
 		return err
 	}
 
-	// Open server and listen for payloads
-	server, err := net.Listen("tcp", "0.0.0.0:"+strconv.Itoa(port))
+	server := &arc.Server{}
+	listener, err := server.Listen(address, true)
 	if err != nil {
 		return err
 	}
-	defer server.Close()
-	fmt.Println("Listening on port", port)
+
+	log.Printf("Server opened on %s.\n", address)
+
 	for {
-		conn, err := server.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
-			fmt.Println("Error: ", err)
+			log.Println(err)
 			continue
 		}
 		go func() {
-			defer conn.Close()
-			var response string
-			err := AcceptPayload(conf, conn)
-			if err != nil {
-				fmt.Print(err)
-				response = err.Error()
-			} else {
-				response = "OK!"
+			ctx := ServerContext{
+				C:      tls.Server(conn, server.Conf),
+				Config: &conf,
+				Log:    log.New(os.Stdout, "", log.LstdFlags),
 			}
-			if err := WriteConnInt64(conn, int64(len(response))); err != nil {
-				fmt.Println(err)
-			}
-			if _, err := conn.Write([]byte(response)); err != nil {
-				fmt.Println(err)
+			err := HandleServerConn(ctx)
+			if arc.IsClosed(err) {
+				log.Println("Client got disconnected.")
+			} else if err != nil {
+				conn.Close()
 			}
 		}()
 	}
 }
 
-func cmdDeploy(name string, args []string) error {
-	var ignoreStr string
-	set := flag.NewFlagSet(name, flag.ExitOnError)
+// TODO improve ignore functionality to be glob based.
+func cmdSend(name string, args []string) error {
+	var ignoreStr, certFilename, keyFilename string
+	set := flag.NewFlagSet(name, flag.ContinueOnError)
 	set.StringVar(&ignoreStr, "i", fmt.Sprintf("%[1]c.git,%[1]c.idea", filepath.Separator), "Ignore project files")
-	set.BoolVar(&Verbose, "v", false, "Be verbose")
+	set.StringVar(&certFilename, "cert", AppFilename("cert"), "")
+	set.StringVar(&keyFilename, "key", AppFilename("key"), "")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
+	address := set.Arg(0)
+	target  := set.Arg(1)
+	filename := set.Arg(2)
 
+	// TODO have more verbose details on each argument error
+	if len(address) == 0 || len(target) == 0 || len(filename) == 0 {
+		return errors.New("Arguments missing; please check your input.")
+	}
+
+	var ignore []string
 	if xs := strings.Split(ignoreStr, ","); len(xs) > 0 {
 		for _, v := range xs {
 			v = strings.TrimSpace(v)
 			if len(v) > 0 {
-				fmt.Println("Ignoring", v)
-				IgnoreFiles = append(IgnoreFiles, v)
+				ignore = append(ignore, v)
 			}
 		}
 	}
 
-	connStr := set.Arg(0)
-	filename := set.Arg(1)
-
-	if connStr == "" {
-		return errors.New("empty connection string")
-	}
-	connStr = "//" + connStr
-
-	if filename == "" {
-		return errors.New("empty filename provided")
-	}
-
-	u, err := url.Parse(connStr)
+	cert, err := tls.LoadX509KeyPair(certFilename, keyFilename)
 	if err != nil {
 		return err
 	}
-
-	port := u.Port()
-	unitName := path.Base(u.Path)
-	actorName := u.User.Username()
-	password, _ := u.User.Password()
-
-	if actorName == "" {
-		return errors.New("empty actor name provided")
+	conf := &tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		InsecureSkipVerify: true,
 	}
-	if password == "" {
-		return errors.New("empty password provided.")
-	}
-	if unitName == "" {
-		return errors.New("empty unit name")
-	}
-	if port == "" {
-		port = strconv.Itoa(defaultPort)
-	}
-
-	fmt.Println("Packing...")
-	data, err := Pack(filename, password)
+	fmt.Println("Dialing...")
+	c, err := tls.Dial("tcp", address, conf)
 	if err != nil {
 		return err
 	}
-	conn, err := net.Dial("tcp", u.Hostname()+":"+port)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
+	defer c.Close()
 
-	// Write all the data in the correct order: unitName(64), actorName(64), size(8), data(N)
-	if err := WriteConnStr(conn, unitName, 64); err != nil {
-		return err
-	}
-	if err := WriteConnStr(conn, actorName, 64); err != nil {
-		return err
-	}
-	if err := WriteConnInt64(conn, int64(len(data))); err != nil {
-		return err
-	}
-	log.Printf("Uploading %d bytes\n", len(data))
-
-	// This block is to give periodic feedback when running the script
-	// Otherwise for very large uploads or slow connections it can appear as if the
-	// the program has stalled
-	started := time.Now()
-	var working = true
-	go func() {
-		for working {
-			time.Sleep(time.Second * 5)
-			log.Printf("%.0f seconds elapsed...\n", time.Now().Sub(started).Seconds())
-		}
-		return
-	}()
-	if n, err := conn.Write(data); err != nil {
-		return err
-	} else {
-		log.Printf("Wrote %d bytes.\n", n)
-	}
-	working = false
-	log.Printf("Waiting...\n")
-
-	// Read the response and print it!
-	strLength, err := ReadConnInt64(conn)
-	if err != nil {
-		return err
-	}
-	response, err := ReadConnStr(conn, strLength)
-	if err != nil {
-		return err
-	}
-	log.Printf("Response: %s\n", response)
-
-	return nil
+	return HandleClientConn(c, target, filename, ignore)
 }
