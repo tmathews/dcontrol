@@ -2,17 +2,17 @@ package main
 
 import (
 	"crypto/tls"
-	"errors"
 	"flag"
 	"fmt"
-	"github.com/BurntSushi/toml"
-	arc "github.com/tmathews/arcnet"
-	cmd "github.com/tmathews/commander"
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"time"
+
+	"github.com/BurntSushi/toml"
+	arc "github.com/tmathews/arcnet"
+	cmd "github.com/tmathews/commander"
 )
 
 func main() {
@@ -21,8 +21,9 @@ func main() {
 		args = os.Args[1:]
 	}
 	err := cmd.Exec(args, cmd.Manual("Welcome to deployctl.", "Send it!\n"), cmd.M{
-		"daemon": cmdDaemon,
-		"send":   cmdSend,
+		"generate": cmdGenerate,
+		"daemon":   cmdDaemon,
+		"send":     cmdSend,
 	})
 	if err != nil {
 		switch v := err.(type) {
@@ -36,16 +37,50 @@ func main() {
 	}
 }
 
-func AppDir() string {
-	switch runtime.GOOS {
-	case "linux":
-		return "/etc/deployctl"
+func cmdGenerate(name string, args []string) error {
+	var org, loc string
+	var d time.Duration
+	set := flag.NewFlagSet(name, flag.ContinueOnError)
+	set.StringVar(&loc, "filepath", "", "Filepath where to write the files, extensions will be added.")
+	set.StringVar(&org, "organization", "", "Organization name to use for certificate.")
+	set.DurationVar(&d, "duration", time.Hour*24*365*5, "How long should this certificate last?")
+	if err := set.Parse(args); err != nil {
+		return err
 	}
-	return ""
-}
 
-func AppFilename(str string) string {
-	return filepath.Join(AppDir(), str)
+	if stat, err := os.Stat(filepath.Dir(loc)); os.IsNotExist(err) {
+		return &FlagError{
+			Flag:   "filepath",
+			Reason: "The provided filepath does not exist, please check your input.",
+		}
+	} else if err != nil {
+		return &FlagError{
+			Flag:   "filepath",
+			Reason: err.Error(),
+		}
+	} else if !stat.IsDir() {
+		return &FlagError{
+			Flag:   "filepath",
+			Reason: "The filepath provided is not a valid directory placement.",
+		}
+	}
+
+	cert, key, err := arc.GenerateCerts(org, d)
+	if err != nil {
+		return err
+	}
+	if err := arc.WriteCertificate(cert, loc+".cert"); err != nil {
+		return err
+	}
+	if err := arc.WritePrivateKey(key, loc+".key"); err != nil {
+		return err
+	}
+
+	signature := GetSignature(cert)
+	fmt.Println("Certificates generated, your public key is below.")
+	fmt.Println(signature)
+
+	return nil
 }
 
 func cmdDaemon(name string, args []string) error {
@@ -68,6 +103,9 @@ func cmdDaemon(name string, args []string) error {
 	}
 
 	server := &arc.Server{}
+	if err := server.LoadCert(certFilename, keyFilename); err != nil {
+		return err
+	}
 	listener, err := server.Listen(address, true)
 	if err != nil {
 		return err
@@ -97,7 +135,6 @@ func cmdDaemon(name string, args []string) error {
 	}
 }
 
-// TODO improve ignore functionality to be glob based.
 func cmdSend(name string, args []string) error {
 	var ignoreStr, certFilename, keyFilename string
 	set := flag.NewFlagSet(name, flag.ContinueOnError)
@@ -107,13 +144,18 @@ func cmdSend(name string, args []string) error {
 	if err := set.Parse(args); err != nil {
 		return err
 	}
-	address := set.Arg(0)
-	target  := set.Arg(1)
-	filename := set.Arg(2)
 
-	// TODO have more verbose details on each argument error
-	if len(address) == 0 || len(target) == 0 || len(filename) == 0 {
-		return errors.New("Arguments missing; please check your input.")
+	address := set.Arg(0)
+	target := set.Arg(1)
+	filename := set.Arg(2)
+	if len(address) == 0 {
+		return &ArgError{Argument: "address", Position: 1, Reason: "Missing"}
+	}
+	if len(target) == 0 {
+		return &ArgError{Argument: "target", Position: 2, Reason: "Missing"}
+	}
+	if len(filename) == 0 {
+		return &ArgError{Argument: "filename", Position: 3, Reason: "Missing"}
 	}
 
 	var ignore []string

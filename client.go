@@ -7,7 +7,7 @@ import (
 )
 
 func HandleClientConn(conn *tls.Conn, target, filename string, ignored []string) error {
-	err := arc.Command(conn, "DEPLOY", target)
+	err := arc.Command(conn, CommandDEPLOY, target)
 	if err != nil {
 		return err
 	}

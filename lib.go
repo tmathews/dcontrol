@@ -2,22 +2,30 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
 const (
 	DefaultAddress = "0.0.0.0:20384"
+	CommandDEPLOY  = "DEPLOY"
 )
 
 type Config struct {
-	// A list of hex signatures that is accepted. Each signature should possess a name at the end separated by a space.
-	// Signatures without names are ignored.
-	Signatures []string
+	// The absolute filename that holds the signatures. Signatures are base64 encoded public keys with a space following
+	// the username associated with it. These usernames are simply lookup keys in Targets to see if they are allowed to
+	// perform deployments.
+	AuthorizeFilename string
 
 	// All the targets configured for deployment.
 	Targets []Target
@@ -26,33 +34,28 @@ type Config struct {
 	BackupDirectory string
 }
 
-func (c *Config) GetSignatures() map[string]string {
-	m := make(map[string]string, len(c.Signatures))
-	for _, v := range c.Signatures {
-		xs := strings.SplitN(v, " ", 2)
+func (c *Config) LoadSignatures() (map[string]string, error) {
+	f, err := os.OpenFile(c.AuthorizeFilename, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	m := make(map[string]string)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		xs := strings.SplitN(scanner.Text(), " ", 2)
 		if len(xs) != 2 {
 			continue
 		}
-		m[xs[1]] = xs[0]
-	}
-	return m
-}
-
-func (c *Config) IsValidSignature(signature string) bool {
-	return c.GetSignatureName(signature) != ""
-}
-
-func (c *Config) GetSignatureName(signature string) string {
-	for _, v := range c.Signatures {
-		xs := strings.SplitN(v, " ", 2)
-		if len(xs) != 2 {
+		k := strings.TrimSpace(xs[0])
+		v := strings.TrimSpace(xs[1])
+		if k == "" || v == "" {
 			continue
 		}
-		if v == signature {
-			return strings.TrimSpace(xs[1])
-		}
+		m[k] = v
 	}
-	return ""
+	return m, scanner.Err()
 }
 
 func (c *Config) GetTargetByName(name string) *Target {
@@ -89,10 +92,12 @@ func (t *Target) Allows(name string) bool {
 	return false
 }
 
-
-func IsProjectPath(p string, ignore []string) bool {
-	for _, v := range ignore {
-		if strings.Contains(p, v) {
+func IsIgnoredFilename(p string, ignore []string) bool {
+	for _, pattern := range ignore {
+		ok, err := filepath.Match(pattern, p)
+		if err != nil {
+			continue
+		} else if ok {
 			return true
 		}
 	}
@@ -111,7 +116,7 @@ func PackTar(filename string, w io.Writer, ignore []string) error {
 	defer writer.Close()
 
 	return filepath.Walk(fp, func(p string, info os.FileInfo, err error) error {
-		if IsProjectPath(p, ignore) {
+		if IsIgnoredFilename(p, ignore) {
 			return nil
 		}
 
@@ -190,4 +195,42 @@ func UnpackTar(reader *tar.Reader) (dir string, err error) {
 		}
 	}
 	return
+}
+
+// TODO handle not ok (which should never happen...)
+func GetSignature(cert *x509.Certificate) string {
+	x, _ := cert.PublicKey.(*rsa.PublicKey)
+	buf := x509.MarshalPKCS1PublicKey(x)
+	return base64.StdEncoding.EncodeToString(buf)
+}
+
+func AppDir() string {
+	switch runtime.GOOS {
+	case "linux":
+		return "/etc/deployctl"
+	}
+	return ""
+}
+
+func AppFilename(str string) string {
+	return filepath.Join(AppDir(), str)
+}
+
+type FlagError struct {
+	Flag   string
+	Reason string
+}
+
+func (e *FlagError) Error() string {
+	return fmt.Sprintf("Flag error '-%s': %s", e.Flag, e.Reason)
+}
+
+type ArgError struct {
+	Argument string
+	Position int
+	Reason   string
+}
+
+func (e *ArgError) Error() string {
+	return fmt.Sprintf("Argument error '%s'(%d): %s", e.Argument, e.Position, e.Reason)
 }

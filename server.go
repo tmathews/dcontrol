@@ -3,7 +3,6 @@ package main
 import (
 	"archive/tar"
 	"crypto/tls"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -28,17 +27,26 @@ type ServerContext struct {
 }
 
 func HandleServerConn(ctx ServerContext) error {
-	signature := hex.EncodeToString(ctx.C.ConnectionState().PeerCertificates[0].Signature)
+	signature := GetSignature(ctx.C.ConnectionState().PeerCertificates[0])
 
 	cmd, input, err := arc.ReadCommand(ctx.C)
 	if err != nil {
 		return err
 	}
-	if cmd != "DEPLOY" {
+	if cmd != CommandDEPLOY {
 		return arc.NotOk(ctx.C, arc.StatusUnsupported, fmt.Sprintf("The command %s is unsupported.", cmd))
 	}
-	username := ctx.Config.GetSignatureName(signature)
-	if username == "" {
+
+	// We want to load on each connection so we don't have to restart the process everytime.
+	// TODO don't load on each connection because there could be collision issues with other goroutines
+	signatures, err := ctx.Config.LoadSignatures()
+	if err != nil {
+		ctx.Log.Printf("LoadSignatures error: %s", err.Error())
+		return arc.NotOk(ctx.C, arc.StatusNotOK, "Failed to look up signatures.")
+	}
+
+	username, ok := signatures[signature]
+	if !ok {
 		return arc.NotOk(ctx.C, arc.StatusBlocked, fmt.Sprintf("You signature was not accepted."))
 	}
 	target := ctx.Config.GetTargetByName(string(input))
