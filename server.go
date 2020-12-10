@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	arc "github.com/tmathews/arcnet"
+	"github.com/tmathews/goio"
 )
 
 var ErrInvalidPayload = errors.New("invalid payload")
@@ -27,14 +27,19 @@ type ServerContext struct {
 }
 
 func HandleServerConn(ctx ServerContext) error {
-	signature := GetSignature(ctx.C.ConnectionState().PeerCertificates[0])
+	if err := ctx.C.Handshake(); err != nil {
+		return err
+	}
 
-	cmd, input, err := arc.ReadCommand(ctx.C)
+	signature := GetSignature(ctx.C.ConnectionState().PeerCertificates[0])
+	ctx.Log.Printf("Got connection! %s", signature)
+
+	cmd, input, err := goio.ReadCommand(ctx.C)
 	if err != nil {
 		return err
 	}
 	if cmd != CommandDEPLOY {
-		return arc.NotOk(ctx.C, arc.StatusUnsupported, fmt.Sprintf("The command %s is unsupported.", cmd))
+		return goio.NotOk(ctx.C, StatusUnsupported, fmt.Sprintf("The command %s is unsupported.", cmd))
 	}
 
 	// We want to load on each connection so we don't have to restart the process everytime.
@@ -42,43 +47,43 @@ func HandleServerConn(ctx ServerContext) error {
 	signatures, err := ctx.Config.LoadSignatures()
 	if err != nil {
 		ctx.Log.Printf("LoadSignatures error: %s", err.Error())
-		return arc.NotOk(ctx.C, arc.StatusNotOK, "Failed to look up signatures.")
+		return goio.NotOk(ctx.C, StatusNotOK, "Failed to look up signatures.")
 	}
 
 	username, ok := signatures[signature]
 	if !ok {
-		return arc.NotOk(ctx.C, arc.StatusBlocked, fmt.Sprintf("You signature was not accepted."))
+		return goio.NotOk(ctx.C, StatusBlocked, fmt.Sprintf("You signature was not accepted."))
 	}
 	target := ctx.Config.GetTargetByName(string(input))
 	if target == nil {
-		return arc.NotOk(ctx.C, arc.StatusNotExist, fmt.Sprintf("The target %s does not exist.", input))
+		return goio.NotOk(ctx.C, StatusNotExist, fmt.Sprintf("The target %s does not exist.", input))
 	}
 	if !target.Allows(username) {
-		return arc.NotOk(ctx.C, arc.StatusBlocked, fmt.Sprintf("You do not have permission to deploy this target."))
+		return goio.NotOk(ctx.C, StatusBlocked, fmt.Sprintf("You do not have permission to deploy this target."))
 	}
 
 	f, err := ioutil.TempFile(os.TempDir(), "deployctl-")
 	if err != nil {
 		ctx.Log.Println(err.Error())
-		return arc.NotOk(ctx.C, arc.StatusNotOK, fmt.Sprintf("There was an error creating a temporary file."))
+		return goio.NotOk(ctx.C, StatusNotOK, fmt.Sprintf("There was an error creating a temporary file."))
 	}
 	defer f.Close()
 
-	if err := arc.Ok(ctx.C); err != nil {
+	if err := goio.Ok(ctx.C); err != nil {
 		return err
 	}
 
 	// Stream the data to our temporary file
-	if err := arc.ReadStream(ctx.C, f); arc.IsClosed(err) {
+	if err := goio.ReadStream(ctx.C, f); goio.IsClosed(err) {
 		return err
 	} else if err != nil {
 		ctx.Log.Println(err.Error())
-		return arc.NotOk(ctx.C, arc.StatusNotOK, "The transmission was broken.")
+		return goio.NotOk(ctx.C, StatusNotOK, "The transmission was broken.")
 	}
 
 	tmpdir, err := PrepareTarget(f)
 	if err != nil {
-		return arc.NotOk(ctx.C, arc.StatusNotOK, "Issue with relocating files.")
+		return goio.NotOk(ctx.C, StatusNotOK, "Issue with relocating files.")
 	} else if tmpdir != "" {
 		defer os.RemoveAll(tmpdir)
 	}
@@ -86,13 +91,13 @@ func HandleServerConn(ctx ServerContext) error {
 
 	// Run our Before commands. Should be things like killing processes, etc.
 	if err := RunScript(target.Before, target.Filename, ctx.Log); err != nil {
-		return arc.NotOk(ctx.C, arc.StatusNotOK, "Issue running Before script.")
+		return goio.NotOk(ctx.C, StatusNotOK, "Issue running Before script.")
 	}
 
 	backup, err := BackupTarget(*target, ctx.Config.BackupDirectory)
 	if err != nil {
 		ctx.Log.Printf("BackupTarget error: %s", err.Error())
-		return arc.NotOk(ctx.C, arc.StatusNotOK, "Failed to backup the target. Please attend.")
+		return goio.NotOk(ctx.C, StatusNotOK, "Failed to backup the target. Please attend.")
 	}
 
 	restore := func() (err error) {
@@ -119,7 +124,7 @@ func HandleServerConn(ctx ServerContext) error {
 		} else {
 			msg += " Restore executed successfully."
 		}
-		return arc.NotOk(ctx.C, arc.StatusNotOK, msg)
+		return goio.NotOk(ctx.C, StatusNotOK, msg)
 	}
 
 	// Run our After command. i.e. Start the process up.
@@ -132,7 +137,7 @@ func HandleServerConn(ctx ServerContext) error {
 		} else {
 			msg += " Restore executed successfully."
 		}
-		return arc.NotOk(ctx.C, arc.StatusNotOK, msg)
+		return goio.NotOk(ctx.C, StatusNotOK, msg)
 	}
 
 	// Delete the backup we created so we save disk space.
@@ -142,7 +147,7 @@ func HandleServerConn(ctx ServerContext) error {
 		}
 	}
 
-	return arc.Ok(ctx.C)
+	return goio.Ok(ctx.C)
 }
 
 func MoveTarget(tmpdir, filename string) error {

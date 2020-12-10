@@ -18,14 +18,20 @@ import (
 
 const (
 	DefaultAddress = "0.0.0.0:20384"
+
 	CommandDEPLOY  = "DEPLOY"
+
+	StatusNotOK = iota + 1
+	StatusUnsupported
+	StatusNotExist
+	StatusBlocked
 )
 
 type Config struct {
 	// The absolute filename that holds the signatures. Signatures are base64 encoded public keys with a space following
 	// the username associated with it. These usernames are simply lookup keys in Targets to see if they are allowed to
 	// perform deployments.
-	AuthorizeFilename string
+	AuthorizedKeys string
 
 	// All the targets configured for deployment.
 	Targets []Target
@@ -35,7 +41,7 @@ type Config struct {
 }
 
 func (c *Config) LoadSignatures() (map[string]string, error) {
-	f, err := os.OpenFile(c.AuthorizeFilename, os.O_RDONLY, 0)
+	f, err := os.OpenFile(c.AuthorizedKeys, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
 	}

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"log"
@@ -11,16 +13,18 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	arc "github.com/tmathews/arcnet"
 	cmd "github.com/tmathews/commander"
+	arc "github.com/tmathews/goio"
 )
+
+const appName = "deployctl"
 
 func main() {
 	var args []string
 	if len(os.Args) >= 2 {
 		args = os.Args[1:]
 	}
-	err := cmd.Exec(args, cmd.Manual("Welcome to deployctl.", "Send it!\n"), cmd.M{
+	err := cmd.Exec(args, cmd.Manual(fmt.Sprintf("Welcome to %s.", appName), "Send it!\n"), cmd.M{
 		"generate": cmdGenerate,
 		"daemon":   cmdDaemon,
 		"send":     cmdSend,
@@ -38,16 +42,22 @@ func main() {
 }
 
 func cmdGenerate(name string, args []string) error {
-	var org, loc string
+	var org string
 	var d time.Duration
-	set := flag.NewFlagSet(name, flag.ContinueOnError)
-	set.StringVar(&loc, "filepath", "", "Filepath where to write the files, extensions will be added.")
+	var pub bool
+	set := flag.NewFlagSet(name, flag.ExitOnError)
 	set.StringVar(&org, "organization", "", "Organization name to use for certificate.")
 	set.DurationVar(&d, "duration", time.Hour*24*365*5, "How long should this certificate last?")
+	set.BoolVar(&pub, "public-key", false, "Print the public key from the provided filepath instead.")
+	set.Usage = func() {
+		fmt.Printf("\n%s %s <filename>\n\n<filename> should be the location where credentials are read/wrote.\n\n", appName, name)
+		set.PrintDefaults()
+	}
 	if err := set.Parse(args); err != nil {
 		return err
 	}
 
+	loc := set.Arg(0)
 	if stat, err := os.Stat(filepath.Dir(loc)); os.IsNotExist(err) {
 		return &FlagError{
 			Flag:   "filepath",
@@ -65,31 +75,49 @@ func cmdGenerate(name string, args []string) error {
 		}
 	}
 
-	cert, key, err := arc.GenerateCerts(org, d)
-	if err != nil {
-		return err
-	}
-	if err := arc.WriteCertificate(cert, loc+".cert"); err != nil {
-		return err
-	}
-	if err := arc.WritePrivateKey(key, loc+".key"); err != nil {
-		return err
+	var cert *x509.Certificate
+	if !pub {
+		var key *rsa.PrivateKey
+		var err error
+		cert, key, err = arc.GenerateCerts(org, d)
+		if err != nil {
+			return err
+		}
+		if err = arc.WriteCertificate(cert, loc+".cert"); err != nil {
+			return err
+		}
+		if err = arc.WritePrivateKey(key, loc+".key"); err != nil {
+			return err
+		}
+		fmt.Println("Certificate & key generated.")
+	} else {
+		if c, err := tls.LoadX509KeyPair(loc+".cert", loc+".key"); err != nil {
+			return err
+		} else {
+			cert, err = x509.ParseCertificate(c.Certificate[0])
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	signature := GetSignature(cert)
-	fmt.Println("Certificates generated, your public key is below.")
-	fmt.Println(signature)
+	fmt.Printf("Public Key:\n%s", signature)
 
 	return nil
 }
 
 func cmdDaemon(name string, args []string) error {
 	var address, confFilename, certFilename, keyFilename string
-	set := flag.NewFlagSet(name, flag.ContinueOnError)
+	set := flag.NewFlagSet(name, flag.ExitOnError)
 	set.StringVar(&address, "address", DefaultAddress, "Address to bind to.")
 	set.StringVar(&confFilename, "config", AppFilename("conf.toml"), "Location of config file.")
 	set.StringVar(&certFilename, "cert", AppFilename("cert"), "")
 	set.StringVar(&keyFilename, "key", AppFilename("key"), "")
+	set.Usage = func() {
+		fmt.Printf("\n%s %s\n\n", appName, name)
+		set.PrintDefaults()
+	}
 	if err := set.Parse(args); err != nil {
 		return err
 	}
@@ -112,6 +140,7 @@ func cmdDaemon(name string, args []string) error {
 	}
 
 	log.Printf("Server opened on %s.\n", address)
+	var logId int
 
 	for {
 		conn, err := listener.Accept()
@@ -120,15 +149,17 @@ func cmdDaemon(name string, args []string) error {
 			continue
 		}
 		go func() {
+			logId++
 			ctx := ServerContext{
 				C:      tls.Server(conn, server.Conf),
 				Config: &conf,
-				Log:    log.New(os.Stdout, "", log.LstdFlags),
+				Log:    log.New(os.Stdout, fmt.Sprintf("con[%d] ", logId), log.LstdFlags),
 			}
 			err := HandleServerConn(ctx)
 			if arc.IsClosed(err) {
-				log.Println("Client got disconnected.")
+				ctx.Log.Println("Client got disconnected.")
 			} else if err != nil {
+				ctx.Log.Println(err)
 				conn.Close()
 			}
 		}()
@@ -137,10 +168,21 @@ func cmdDaemon(name string, args []string) error {
 
 func cmdSend(name string, args []string) error {
 	var ignoreStr, certFilename, keyFilename string
-	set := flag.NewFlagSet(name, flag.ContinueOnError)
+	set := flag.NewFlagSet(name, flag.ExitOnError)
 	set.StringVar(&ignoreStr, "i", fmt.Sprintf("%[1]c.git,%[1]c.idea", filepath.Separator), "Ignore project files")
 	set.StringVar(&certFilename, "cert", AppFilename("cert"), "")
 	set.StringVar(&keyFilename, "key", AppFilename("key"), "")
+	set.Usage = func() {
+		fmt.Printf(`
+%s %s <address> <target> <filename>
+
+<address>  the server address and port to send to e.g. %s
+<target>   the target name to deploy
+<filename> the filepath to a directory or file which is to be sent as the target
+
+`, appName, name, DefaultAddress)
+		set.PrintDefaults()
+	}
 	if err := set.Parse(args); err != nil {
 		return err
 	}

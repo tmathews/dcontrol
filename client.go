@@ -2,21 +2,28 @@ package main
 
 import (
 	"crypto/tls"
+	"fmt"
 
-	arc "github.com/tmathews/arcnet"
+	"github.com/tmathews/goio"
 )
 
 func HandleClientConn(conn *tls.Conn, target, filename string, ignored []string) error {
-	err := arc.Command(conn, CommandDEPLOY, target)
+	if err := conn.Handshake(); err != nil {
+		fmt.Println(err)
+		return err
+	}
+
+	fmt.Println("proceeding with command")
+	err := goio.Command(conn, CommandDEPLOY, target)
 	if err != nil {
 		return err
 	}
 
-	sw := arc.NewStreamWriter(conn)
+	sw := goio.NewStreamWriter(conn)
 	err = PackTar(filename, sw, ignored)
 	sw.Terminate()
 	if err != nil {
 		return err
 	}
-	return arc.ReadStatus(conn)
+	return goio.ReadStatus(conn)
 }

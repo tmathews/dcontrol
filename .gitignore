@@ -1,2 +1,5 @@
 bin
 .idea
+certs
+*.toml
+authorized_keys
