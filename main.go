@@ -14,7 +14,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	cmd "github.com/tmathews/commander"
-	arc "github.com/tmathews/goio"
+	"github.com/tmathews/goio"
 )
 
 const appName = "deployctl"
@@ -79,14 +79,14 @@ func cmdGenerate(name string, args []string) error {
 	if !pub {
 		var key *rsa.PrivateKey
 		var err error
-		cert, key, err = arc.GenerateCerts(org, d)
+		cert, key, err = goio.GenerateCerts(org, d)
 		if err != nil {
 			return err
 		}
-		if err = arc.WriteCertificate(cert, loc+".cert"); err != nil {
+		if err = goio.WriteCertificate(cert, loc+".cert"); err != nil {
 			return err
 		}
-		if err = arc.WritePrivateKey(key, loc+".key"); err != nil {
+		if err = goio.WritePrivateKey(key, loc+".key"); err != nil {
 			return err
 		}
 		fmt.Println("Certificate & key generated.")
@@ -130,7 +130,7 @@ func cmdDaemon(name string, args []string) error {
 		return err
 	}
 
-	server := &arc.Server{}
+	server := &goio.Server{}
 	if err := server.LoadCert(certFilename, keyFilename); err != nil {
 		return err
 	}
@@ -156,7 +156,7 @@ func cmdDaemon(name string, args []string) error {
 				Log:    log.New(os.Stdout, fmt.Sprintf("con[%d] ", logId), log.LstdFlags),
 			}
 			err := HandleServerConn(ctx)
-			if arc.IsClosed(err) {
+			if goio.IsClosed(err) {
 				ctx.Log.Println("Client got disconnected.")
 			} else if err != nil {
 				ctx.Log.Println(err)
