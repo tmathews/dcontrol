@@ -19,7 +19,7 @@ import (
 const (
 	DefaultAddress = "0.0.0.0:20384"
 
-	CommandDEPLOY  = "DEPLOY"
+	CommandDEPLOY = "DEPLOY"
 
 	StatusNotOK = iota + 1
 	StatusUnsupported
