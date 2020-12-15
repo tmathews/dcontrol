@@ -1,38 +1,36 @@
 # Deployment Controller
 
-Deployment Controller (dcontrol) is a small and simple utility that transfers data from one computer to another. It was created to make it 
-easier for my teammates to update and restart processes on our servers. 
+Deployment Controller is a small and simple utility that transfers data from one computer to another. It was 
+created to make it easier for my teammates to update and restart processes on our servers.
 
-The key feature is that it restarts the systemd targets you specify when the payload is successfully delivered. Originally I wanted to use 
-DBUS to talk to systemd to get proper error information if it fails - this was never done as it was a quick project I did in my free time.
+You can use Before/After commands to run custom scripts to stop/start processes for targets.
 
-I'd advise you use the command before/after feature to control service restarts instead - we check the exit code of the program for success.
+## Goals
 
-## Notices
-
- * As said above it is recommend to use the Before/After feature instead of systemd targets.
- * We'll probably remove the `BackupDirectory` option in the future and just use a temporary directory which can be overrided.
-
-## Deployment String
-
-We use a simple URL to specify credentials, see the example below.
-
-`dcontrol deploy username:password@domain/unit filepath`
+ * Be fast, easy, and most of all secure
+ * Forget about passwords, use keys!
+ * Avoid complexities of the cloud
+ * Be flexible & cross platform
 
 ## Configuration
 
-A TOML file is used for configuration. I'd advise you set it up in `/etc/dcontrol/conf.toml`. See an example of this file below:
+A TOML file is used for configuration. Place it somewhere such as `/etc/deployctl/conf.toml`
 
 ```
-BackupDirectory="/root/bak"
+AuthorizedKeys = "authorized_keys" # See example below
+BackupDirectory = "tmp/backups"
 
-[[Actors]]
-Name = "tom"
-Password = "notaninsecurepassword"
+[[Targets]]
+Name = "test"
+Authorized = ["*"]
+Filename = "bin/thing"
+Before = "dobefore.sh"
+After = "doafter.sh"
+```
 
-[[Units]]
-Name = "http-server"
-SystemTargets = ["http"]
-Filepath = "/etc/http-server/bin/http"
-AllowedActors = ["tom"]
+The authorized keys is a file of base64 encoded public keys, via the `generate` command, and their names. Use one line
+per key & user.
+
+```
+MIICCgKCAgEAo+GmAsm41j0ZN14HLiNdS6DBlJY...kOs+UILwFJ0ggDSafG3i/6cCAwEAAQ== user
 ```
