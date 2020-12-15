@@ -42,23 +42,18 @@ func HandleServerConn(ctx ServerContext) error {
 		return goio.NotOk(ctx.C, StatusUnsupported, fmt.Sprintf("The command %s is unsupported.", cmd))
 	}
 
-	// We want to load on each connection so we don't have to restart the process everytime.
-	// TODO don't load on each connection because there could be collision issues with other goroutines
-	signatures, err := ctx.Config.LoadSignatures()
+	name, err := ctx.Config.GetSignatureName(signature)
 	if err != nil {
-		ctx.Log.Printf("LoadSignatures error: %s", err.Error())
-		return goio.NotOk(ctx.C, StatusNotOK, "Failed to look up signatures.")
-	}
-
-	username, ok := signatures[signature]
-	if !ok {
+		ctx.Log.Printf("GetSignatureName error: %s", err.Error())
+		return goio.NotOk(ctx.C, StatusNotOK, "Failed to look up signature.")
+	} else if len(name) == 0 {
 		return goio.NotOk(ctx.C, StatusBlocked, fmt.Sprintf("You signature was not accepted."))
 	}
 	target := ctx.Config.GetTargetByName(string(input))
 	if target == nil {
 		return goio.NotOk(ctx.C, StatusNotExist, fmt.Sprintf("The target %s does not exist.", input))
 	}
-	if !target.Allows(username) {
+	if !target.Allows(name) {
 		return goio.NotOk(ctx.C, StatusBlocked, fmt.Sprintf("You do not have permission to deploy this target."))
 	}
 
@@ -90,7 +85,8 @@ func HandleServerConn(ctx ServerContext) error {
 	f.Close()
 
 	// Run our Before commands. Should be things like killing processes, etc.
-	if err := RunScript(target.Before, target.Filename, ctx.Log); err != nil {
+	if err := RunScript(target.Before, ctx.Log); err != nil {
+		ctx.Log.Println(err.Error())
 		return goio.NotOk(ctx.C, StatusNotOK, "Issue running Before script.")
 	}
 
@@ -109,7 +105,7 @@ func HandleServerConn(ctx ServerContext) error {
 		if err != nil {
 			return
 		}
-		return RunScript(target.After, target.Filename, ctx.Log)
+		return RunScript(target.After, ctx.Log)
 	}
 
 	if err := MoveTarget(tmpdir, target.Filename); err != nil {
@@ -128,7 +124,7 @@ func HandleServerConn(ctx ServerContext) error {
 	}
 
 	// Run our After command. i.e. Start the process up.
-	if err := RunScript(target.After, target.Filename, ctx.Log); err != nil {
+	if err := RunScript(target.After, ctx.Log); err != nil {
 		ctx.Log.Printf("After error: %s", err.Error())
 		msg := "Issue running After script."
 		if err := restore(); err != nil {
@@ -196,8 +192,12 @@ func PrepareTarget(rs io.ReadSeeker) (string, error) {
 	return UnpackTar(tar.NewReader(rs))
 }
 
-func RunScript(str string, workingDir string, log *log.Logger) error {
-	xs := strings.Split(str, " ")
+func RunScript(command string, log *log.Logger) error {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return nil
+	}
+	xs := strings.Split(command, " ")
 	if len(xs) == 0 {
 		return nil
 	}
@@ -206,7 +206,6 @@ func RunScript(str string, workingDir string, log *log.Logger) error {
 		arguments = xs[1:]
 	}
 	cmd := exec.Command(xs[0], arguments...)
-	cmd.Dir = workingDir
 	cmd.Stdout = log.Writer()
 	cmd.Stderr = log.Writer()
 	if err := cmd.Start(); err != nil {

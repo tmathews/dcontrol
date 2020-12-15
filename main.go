@@ -50,7 +50,7 @@ func cmdGenerate(name string, args []string) error {
 	set.DurationVar(&d, "duration", time.Hour*24*365*5, "How long should this certificate last?")
 	set.BoolVar(&pub, "public-key", false, "Print the public key from the provided filepath instead.")
 	set.Usage = func() {
-		fmt.Printf("\n%s %s <filename>\n\n<filename> should be the location where credentials are read/wrote.\n\n", appName, name)
+		fmt.Printf("\n%s %s [flags...] <filename>\n\n<filename> should be the location where credentials are read/wrote.\n\n", appName, name)
 		set.PrintDefaults()
 	}
 	if err := set.Parse(args); err != nil {
@@ -115,7 +115,7 @@ func cmdDaemon(name string, args []string) error {
 	set.StringVar(&certFilename, "cert", AppFilename("cert"), "")
 	set.StringVar(&keyFilename, "key", AppFilename("key"), "")
 	set.Usage = func() {
-		fmt.Printf("\n%s %s\n\n", appName, name)
+		fmt.Printf("\n%s %s [flags...]\n\n", appName, name)
 		set.PrintDefaults()
 	}
 	if err := set.Parse(args); err != nil {
@@ -174,7 +174,7 @@ func cmdSend(name string, args []string) error {
 	set.StringVar(&keyFilename, "key", AppFilename("key"), "")
 	set.Usage = func() {
 		fmt.Printf(`
-%s %s <address> <target> <filename>
+%s %s [flags...] <address> <target> <filename>
 
 <address>  the server address and port to send to e.g. %s
 <target>   the target name to deploy
@@ -225,5 +225,5 @@ func cmdSend(name string, args []string) error {
 	}
 	defer c.Close()
 
-	return HandleClientConn(c, target, filename, ignore)
+	return HandleClientConn(tls.Client(c, conf), target, filename, ignore)
 }

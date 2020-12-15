@@ -2,11 +2,11 @@ package main
 
 import (
 	"archive/tar"
-	"bufio"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
 	"fmt"
+	"github.com/tmathews/goio"
 	"io"
 	"io/ioutil"
 	"os"
@@ -40,6 +40,37 @@ type Config struct {
 	BackupDirectory string
 }
 
+func (c *Config) GetSignatureName(signature string) (name string, err error) {
+	var f *os.File
+	f, err = os.OpenFile(c.AuthorizedKeys, os.O_RDONLY, 0)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	for {
+		var s, n []byte
+		s, err = goio.ReadUntilByte(f, ' ')
+		if err != nil {
+			break
+		}
+		n, err = goio.ReadUntilByte(f, '\n', '\r')
+		if err != nil && err != io.EOF {
+			break
+		}
+		if string(s) == signature {
+			name = string(n)
+			break
+		} else if err == io.EOF {
+			break
+		}
+	}
+	if err == io.EOF {
+		err = nil
+	}
+	return strings.TrimSpace(name), err
+}
+
 func (c *Config) LoadSignatures() (map[string]string, error) {
 	f, err := os.OpenFile(c.AuthorizedKeys, os.O_RDONLY, 0)
 	if err != nil {
@@ -48,20 +79,26 @@ func (c *Config) LoadSignatures() (map[string]string, error) {
 	defer f.Close()
 
 	m := make(map[string]string)
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		xs := strings.SplitN(scanner.Text(), " ", 2)
-		if len(xs) != 2 {
-			continue
+	for {
+		var exit bool
+		key, err := goio.ReadUntilByte(f, ' ')
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			return nil, err
 		}
-		k := strings.TrimSpace(xs[0])
-		v := strings.TrimSpace(xs[1])
-		if k == "" || v == "" {
-			continue
+		name, err := goio.ReadUntilByte(f, '\n', '\r')
+		if err == io.EOF {
+			exit = true
+		} else if err != nil {
+			return nil, err
 		}
-		m[k] = v
+		m[string(key)] = string(name)
+		if exit {
+			break
+		}
 	}
-	return m, scanner.Err()
+	return m, nil
 }
 
 func (c *Config) GetTargetByName(name string) *Target {
