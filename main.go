@@ -17,7 +17,7 @@ import (
 	"github.com/tmathews/goio"
 )
 
-const appName = "deployctl"
+const appName = "dctl"
 
 func main() {
 	var args []string
@@ -28,6 +28,7 @@ func main() {
 		"generate": cmdGenerate,
 		"daemon":   cmdDaemon,
 		"send":     cmdSend,
+		"ping":     cmdPing,
 	})
 	if err != nil {
 		switch v := err.(type) {
@@ -166,12 +167,59 @@ func cmdDaemon(name string, args []string) error {
 	}
 }
 
+func cmdPing(name string, args []string) error {
+	var certFilename, keyFilename string
+	set := flag.NewFlagSet(name, flag.ExitOnError)
+	set.StringVar(&certFilename, "cert", UsrFilename("cert"), "")
+	set.StringVar(&keyFilename, "key", UsrFilename("key"), "")
+	set.Usage = func() {
+		fmt.Printf(`
+%s %s [flags...] <address>
+
+<address>  the server address and port to send to e.g. %s
+
+`, appName, name, DefaultAddress)
+		set.PrintDefaults()
+	}
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+
+	address := set.Arg(0)
+	if len(address) == 0 {
+		return &ArgError{Argument: "address", Position: 1, Reason: "Missing"}
+	}
+
+	cert, err := tls.LoadX509KeyPair(certFilename, keyFilename)
+	if err != nil {
+		return err
+	}
+	conf := &tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		InsecureSkipVerify: true,
+	}
+	fmt.Println("Dialing...")
+	c, err := tls.Dial("tcp", address, conf)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+
+	err = HandleClientConnPing(tls.Client(c, conf))
+	if err != nil {
+		return err
+	}
+	fmt.Println("PING successful!")
+	return nil
+}
+
+
 func cmdSend(name string, args []string) error {
 	var ignoreStr, certFilename, keyFilename string
 	set := flag.NewFlagSet(name, flag.ExitOnError)
-	set.StringVar(&ignoreStr, "i", fmt.Sprintf("%[1]c.git,%[1]c.idea", filepath.Separator), "Ignore project files")
-	set.StringVar(&certFilename, "cert", AppFilename("cert"), "")
-	set.StringVar(&keyFilename, "key", AppFilename("key"), "")
+	set.StringVar(&ignoreStr, "ignore", fmt.Sprintf("%[1]c.git,%[1]c.idea", filepath.Separator), "Ignore project files")
+	set.StringVar(&certFilename, "cert", UsrFilename("cert"), "")
+	set.StringVar(&keyFilename, "key", UsrFilename("key"), "")
 	set.Usage = func() {
 		fmt.Printf(`
 %s %s [flags...] <address> <target> <filename>

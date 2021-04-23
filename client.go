@@ -27,3 +27,11 @@ func HandleClientConn(conn *tls.Conn, target, filename string, ignored []string)
 	}
 	return goio.ReadStatus(conn)
 }
+
+func HandleClientConnPing(conn *tls.Conn) error {
+	if err := conn.Handshake(); err != nil {
+		fmt.Println(err)
+		return err
+	}
+	return goio.Command(conn, CommandPING, "")
+}

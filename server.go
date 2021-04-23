@@ -38,7 +38,16 @@ func HandleServerConn(ctx ServerContext) error {
 	if err != nil {
 		return err
 	}
-	if cmd != CommandDEPLOY {
+	ctx.Log.Printf("Got command '%s' input len(%d)", cmd, len(input))
+
+	switch cmd {
+	case CommandDEPLOY:
+		// Just continue onto the next code.
+		break
+	case CommandPING:
+		// Write the PONG by saying OK status. No need to write pong IMO...
+		return goio.Ok(ctx.C)
+	default:
 		return goio.NotOk(ctx.C, StatusUnsupported, fmt.Sprintf("The command %s is unsupported.", cmd))
 	}
 

@@ -21,6 +21,7 @@ const (
 	DefaultAddress = "0.0.0.0:20384"
 
 	CommandDEPLOY = "DEPLOY"
+	CommandPING   = "PING"
 
 	StatusNotOK = iota + 1
 	StatusUnsupported
@@ -251,13 +252,22 @@ func GetSignature(cert *x509.Certificate) string {
 func AppDir() string {
 	switch runtime.GOOS {
 	case "linux":
-		return "/etc/deployctl"
+		return "/etc/dctl"
 	}
 	return ""
 }
 
+func UsrDir() string {
+	str, _ := os.UserHomeDir()
+	return filepath.Join(str, ".dctl")
+}
+
 func AppFilename(str string) string {
 	return filepath.Join(AppDir(), str)
+}
+
+func UsrFilename(str string) string {
+	return filepath.Join(UsrDir(), str)
 }
 
 type FlagError struct {
