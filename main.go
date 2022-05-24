@@ -4,8 +4,11 @@ import (
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"flag"
 	"fmt"
+	"golang.org/x/crypto/ssh"
+	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -25,10 +28,11 @@ func main() {
 		args = os.Args[1:]
 	}
 	err := cmd.Exec(args, cmd.Manual(fmt.Sprintf("Welcome to %s.", appName), "Send it!\n"), cmd.M{
-		"generate": cmdGenerate,
-		"daemon":   cmdDaemon,
-		"send":     cmdSend,
-		"ping":     cmdPing,
+		"generate":  cmdGenerate,
+		"daemon":    cmdDaemon,
+		"send":      cmdSend,
+		"ping":      cmdPing,
+		"test-keys": cmdTestKeys,
 	})
 	if err != nil {
 		switch v := err.(type) {
@@ -213,7 +217,6 @@ func cmdPing(name string, args []string) error {
 	return nil
 }
 
-
 func cmdSend(name string, args []string) error {
 	var ignoreStr, certFilename, keyFilename string
 	set := flag.NewFlagSet(name, flag.ExitOnError)
@@ -274,4 +277,116 @@ func cmdSend(name string, args []string) error {
 	defer c.Close()
 
 	return HandleClientConn(tls.Client(c, conf), target, filename, ignore)
+}
+
+func cmdTestKeys(name string, args []string) error {
+	root := "C:\\Go\\src\\github.com\\tmathews\\dcontrol\\.ssh\\"
+
+	//cert := root + "id_rsa.pub"
+	loadSSH(root + "id_rsa")
+
+	return nil
+	//certificate, err := tls.X509KeyPair()
+	//fmt.Println(certificate)
+	//return err
+}
+
+func loadSSH(filename string) {
+	f, err := os.Open(filename)
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+	buf, _ := ioutil.ReadAll(f)
+
+	priv, err := ssh.ParsePrivateKey(buf)
+	if err != nil {
+		panic(err)
+	}
+
+	parsedCryptoKey := priv.PublicKey().(ssh.CryptoPublicKey)
+	pubCrypto := parsedCryptoKey.CryptoPublicKey()
+	pub := pubCrypto.(*rsa.PublicKey)
+
+	encoded := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PUBLIC KEY",
+		Bytes: x509.MarshalPKCS1PublicKey(pub),
+	})
+
+	fmt.Printf("%s\n", encoded)
+
+	/*
+		// First, generate the test RSA keypair in SSH format
+		priv, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			log.Fatal(err)
+		}
+		rsaPub := priv.PublicKey
+		sshPub, err := ssh.NewPublicKey(&rsaPub)
+		if err != nil {
+			log.Fatal(err)
+		}
+		sshPubBytes := sshPub.Marshal()
+
+		// Now we can convert it back to PEM format
+		// Remember: if you're reading the public key from a file, you probably
+		// want ssh.ParseAuthorizedKey.
+		parsed, err := ssh.ParsePublicKey(sshPubBytes)
+		if err != nil {
+			log.Fatal(err)
+		}
+		// To get back to an *rsa.PublicKey, we need to first upgrade to the
+		// ssh.CryptoPublicKey interface
+		parsedCryptoKey := parsed.(ssh.CryptoPublicKey)
+
+		// Then, we can call CryptoPublicKey() to get the actual crypto.PublicKey
+		pubCrypto := parsedCryptoKey.CryptoPublicKey()
+
+		// Finally, we can convert back to an *rsa.PublicKey
+		pub := pubCrypto.(*rsa.PublicKey)
+
+		// After this, it's encoding to PEM - same as always
+		encoded := pem.EncodeToMemory(&pem.Block{
+			Type:  "RSA PUBLIC KEY",
+			Bytes: x509.MarshalPKCS1PublicKey(pub),
+		})
+		fmt.Printf("%s", encoded)
+	*/
+}
+
+func loadBlock(filename string) []byte {
+	f, err := os.Open(filename)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	buf, _ := ioutil.ReadAll(f)
+	fmt.Println(string(buf))
+	fmt.Println("<<<-----")
+
+	p, _ := pem.Decode(buf)
+	fmt.Println(p.Type)
+	fmt.Println("<<<-----")
+	fmt.Println(p.Headers)
+	fmt.Println("<<<-----")
+	fmt.Println(len(p.Bytes))
+	fmt.Println("<<<----- TRY PARSING IT")
+
+	parsers := []func([]byte) (any, error){
+		x509.ParsePKCS8PrivateKey,
+		func(buf []byte) (any, error) { return x509.ParseECPrivateKey(buf) },
+		func(buf []byte) (any, error) { return x509.ParsePKCS1PrivateKey(buf) },
+	}
+	var key any
+	for _, parser := range parsers {
+		key, err = parser(p.Bytes)
+		if err == nil {
+			break
+		} else {
+			fmt.Println(err)
+		}
+	}
+	fmt.Println("KEY-->>>", key)
+
+	return buf
 }
